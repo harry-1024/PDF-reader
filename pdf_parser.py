@@ -72,4 +72,4 @@ def process_sds(pdf_path):
 # --- HOW TO RUN ---
 # 1. Replace 'test_sds.pdf' with your actual filename
 # 2. Make sure the PDF is in the same folder as this script
-# process_sds("test_sds.pdf")
+process_sds("test_sds.pdf")
