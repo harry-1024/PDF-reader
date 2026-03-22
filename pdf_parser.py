@@ -4,24 +4,17 @@ import pandas as pd
 import os
 
 def get_conservative_percentage(line_text):
-    """
-    Improved: Searches the entire line for percentage-like patterns
-    and returns the highest number found.
-    """
-    # Look for patterns like "10-30", "10 - 30", "< 5", "80%"
-    # This regex is broader to catch numbers even if the % sign is far away
+    """Searches the line for numbers and returns the highest valid percentage."""
     numbers = re.findall(r'(\d+(?:\.\d+)?)', line_text)
-    
-    # We only want numbers that are likely percentages (usually 0.1 to 100)
+    # We filter for 0.1 to 100 to avoid picking up CAS parts or Years
     valid_percents = [float(n) for n in numbers if 0.1 <= float(n) <= 100]
-    
     return max(valid_percents) if valid_percents else 0.0
 
 def check_physical_properties(text):
     props = {"is_solid": "N", "is_volatile": "N"}
     if re.search(r'\b(Solid|Powder|Dust|Crystal|Granules|Flakes)\b', text, re.I):
         props["is_solid"] = "Y"
-    if re.search(r'\b(Volatile|Vapor Pressure|Evaporation)\b', text, re.I):
+    if re.search(r'\b(Volatile|Vapor Pressure|Evaporation|Liquid)\b', text, re.I):
         props["is_volatile"] = "Y"
     return props
 
@@ -35,7 +28,7 @@ def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
     for filename in os.listdir(folder_path):
         if filename.lower().endswith(".pdf"):
             pdf_path = os.path.join(folder_path, filename)
-            product_name = filename.rsplit('.', 1)[0] # Strip .pdf extension
+            product_name = filename.rsplit('.', 1)[0]
             
             try:
                 print(f"🔍 Analyzing: {filename}...")
@@ -48,20 +41,19 @@ def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
                         if not page_text: continue
                         
                         for line in page_text.split('\n'):
-                            # Find CAS Number
                             cas_match = re.search(r'(\d{2,7}-\d{2}-\d)', line)
                             if cas_match:
-                                cas = cas_match.group(1)
+                                cas = cas_match.group(1).strip()
                                 
-                                # Extract Name (Everything before the CAS)
+                                # CLEANING STEP: Extract and normalize the name
                                 name_part = line.split(cas)[0].strip()
-                                name = re.sub(r'^[\d\.\-\s•*]+', '', name_part) or "Unknown Chemical"
+                                name = re.sub(r'^[\d\.\-\s•*]+', '', name_part).strip().upper()
+                                if not name: name = "UNKNOWN CHEMICAL"
                                 
-                                # Extract Percentage from the same line
                                 percent_val = get_conservative_percentage(line)
 
                                 all_data.append({
-                                    "Contaminant Name": name.upper(),
+                                    "Contaminant Name": name,
                                     "CAS Number": cas,
                                     "Solids (Y/N)": phys["is_solid"],
                                     "Volatile (Y/N)": phys["is_volatile"],
@@ -69,18 +61,21 @@ def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
                                     "Percentage": percent_val
                                 })
             except Exception as e:
-                print(f"Skipping {filename} due to error: {e}")
+                print(f"Skipping {filename}: {e}")
 
     if not all_data:
-        print("❌ No data was extracted. Please check if PDFs are readable.")
+        print("❌ No data extracted.")
         return
 
-    # Create DataFrame
+    # 1. Create DataFrame
     df = pd.DataFrame(all_data)
 
-    # 1. Pivot Table: Contaminants as Rows, Products as Columns
-    # index: First 4 columns you requested
-    # columns: The Product Names (from filenames)
+    # 2. Hard Deduplication before Pivoting
+    # This removes exact duplicates (Name + CAS + Product + Percent)
+    df = df.drop_duplicates()
+
+    # 3. Pivot Table
+    # 'aggfunc=max' ensures if a chemical is listed twice in ONE pdf, we only take the highest value once.
     matrix = df.pivot_table(
         index=["Contaminant Name", "CAS Number", "Solids (Y/N)", "Volatile (Y/N)"],
         columns="Product",
@@ -88,24 +83,17 @@ def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
         aggfunc='max'
     ).reset_index()
 
-    # 2. Sort Alphabetically by Name
+    # 4. Final alphabetical sort
     matrix = matrix.sort_values(by="Contaminant Name")
-
-    # 3. Final polish: Fill empty cells with 0 (if a product doesn't have that chemical)
     matrix = matrix.fillna(0)
 
-    # Save to Excel
     matrix.to_excel(output_name, index=False)
-    print(f"\n✅ Master Matrix Created!")
-    print(f"📂 Location: {os.path.abspath(output_name)}")
+    print(f"\n✅ Success! Clean Master Matrix saved to: {output_name}")
 
-# --- AUTO-RUN ---
-# This looks for a folder called 'sds_files' in your project directory
+# --- EXECUTION ---
 sds_folder = os.path.join(os.getcwd(), "sds_files")
-
-if not os.path.exists(sds_folder):
-    os.makedirs(sds_folder)
-    print(f"Empty folder created at: {sds_folder}")
-    print("Please put your SDS PDFs in that folder and run this script again.")
-else:
+if os.path.exists(sds_folder):
     process_all_sds(sds_folder)
+else:
+    os.makedirs(sds_folder)
+    print(f"Created folder: {sds_folder}. Add PDFs and run again.")
