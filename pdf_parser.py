@@ -3,21 +3,19 @@ import re
 import pandas as pd
 
 def get_conservative_percentage(percent_string):
-    """提取百分比范围中的最高值 (Conservatism)"""
+    """Extracts the highest numerical value from a range string."""
     numbers = re.findall(r'[\d\.]+', percent_string)
     if not numbers:
         return 0.0
     return max(float(n) for n in numbers)
 
 def check_physical_properties(text):
-    """判断物理状态与挥发性"""
-    props = {"is_solid": "No", "is_volatile": "No"}
-    # Check for solid keywords
+    """Detects physical state and volatility."""
+    props = {"is_solid": "N", "is_volatile": "N"}
     if re.search(r'\b(Solid|Powder|Dust|Crystal|Granules)\b', text, re.I):
-        props["is_solid"] = "Yes"
-    # Check for volatility (Vapor pressure or keywords)
+        props["is_solid"] = "Y"
     if "volatile" in text.lower() or "vapor pressure" in text.lower():
-        props["is_volatile"] = "Yes"
+        props["is_volatile"] = "Y"
     return props
 
 def process_sds_to_excel(pdf_path, output_name="SDS_Results.xlsx"):
@@ -26,59 +24,66 @@ def process_sds_to_excel(pdf_path, output_name="SDS_Results.xlsx"):
     try:
         print(f"--- Analyzing: {pdf_path} ---")
         with pdfplumber.open(pdf_path) as pdf:
-            # Combine text from all pages for physical property search
             full_text = "".join([p.extract_text() or "" for p in pdf.pages])
             
-            # 1. Section 9: Density & Properties
+            # Global properties
             density_match = re.search(r'(?:Relative Density|Specific Gravity|Density):\s*([\d\.]+)', full_text, re.I)
             density = density_match.group(1) if density_match else "N/A"
             phys = check_physical_properties(full_text)
             
-            # 2. Section 3: Ingredients (Line-by-Line Smart Match)
             for page in pdf.pages:
                 page_text = page.extract_text()
                 if not page_text: continue
                 
                 lines = page_text.split('\n')
                 for line in lines:
-                    # Look for CAS (Pattern: 1-7 digits, dash, 2 digits, dash, 1 digit)
+                    # Look for CAS number
                     cas_match = re.search(r'(\b\d{2,7}-\d{2}-\d\b)', line)
                     if cas_match:
                         cas = cas_match.group(1)
-                        # Look for Percentage in the same line
-                        percent_match = re.search(r'([\d\.]+\s*-\s*[\d\.]+\s*%|[\d\.]+\s*%|[\d\.]+\s*percent)', line, re.I)
                         
-                        if percent_match:
-                            percent_val = get_conservative_percentage(percent_match.group(1))
-                        else:
-                            percent_val = "Detected (Check Manual)"
+                        # 1. Extract Name (Text before the CAS number)
+                        # We take everything before the CAS and clean up extra spaces/symbols
+                        name_part = line.split(cas)[0].strip()
+                        # Clean up common leading characters like bullet points or numbers
+                        name = re.sub(r'^[\d\.\-\s•*]+', '', name_part) or "Unknown Name"
+                        
+                        # 2. Extract Percentage
+                        percent_match = re.search(r'([\d\.]+\s*-\s*[\d\.]+\s*%|[\d\.]+\s*%|[\d\.]+\s*percent)', line, re.I)
+                        percent_val = get_conservative_percentage(percent_match.group(1)) if percent_match else "Check PDF"
 
+                        # 3. Build row in your specific order
                         all_data.append({
+                            "Contaminant Name": name,
                             "CAS Number": cas,
-                            "Max Concentration (%)": percent_val,
-                            "Relative Density": density,
-                            "Is Solid": phys["is_solid"],
-                            "Is Volatile": phys["is_volatile"],
-                            "Source File": pdf_path
+                            "Solids (Y/N)": phys["is_solid"],
+                            "Volatile (Y/N)": phys["is_volatile"],
+                            "% Composition": percent_val,
+                            "Relative Density": density
                         })
 
         if not all_data:
-            print("❌ No ingredients found. Please ensure the PDF is not a scanned image.")
-            # Debug: Print first bit of text to see what Python sees
-            print("Debug Sample Text:", full_text[:300])
+            print("❌ No ingredients found.")
             return
 
-        # 3. Clean up and Save
-        df = pd.DataFrame(all_data).drop_duplicates(subset=['CAS Number', 'Max Concentration (%)'])
-        df.to_excel(output_name, index=False)
+        # Create DataFrame and Reorder Columns explicitly
+        df = pd.DataFrame(all_data).drop_duplicates()
         
-        print(f"✅ Success! Found {len(df)} unique components.")
-        print(f"📊 Results saved to: {output_name}")
-        print(df[['CAS Number', 'Max Concentration (%)']].to_string(index=False))
+        column_order = [
+            "Contaminant Name", 
+            "CAS Number", 
+            "Solids (Y/N)", 
+            "Volatile (Y/N)", 
+            "% Composition",
+            "Relative Density"
+        ]
+        df = df[column_order]
+
+        df.to_excel(output_name, index=False)
+        print(f"✅ Success! Results saved to: {output_name}")
         
     except Exception as e:
         print(f"An error occurred: {e}")
 
-# --- START THE PROGRAM ---
-# Ensure your PDF file is named exactly "test_sds.pdf" and is in the same folder
+# Run it
 process_sds_to_excel("test_sds.pdf")
