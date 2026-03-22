@@ -1,16 +1,13 @@
 import pdfplumber
 import re
 import pandas as pd
+import os
 
 def get_conservative_percentage(percent_string):
-    """Extracts the highest numerical value from a range string."""
     numbers = re.findall(r'[\d\.]+', percent_string)
-    if not numbers:
-        return 0.0
-    return max(float(n) for n in numbers)
+    return max(float(n) for n in numbers) if numbers else 0.0
 
 def check_physical_properties(text):
-    """Detects physical state and volatility."""
     props = {"is_solid": "N", "is_volatile": "N"}
     if re.search(r'\b(Solid|Powder|Dust|Crystal|Granules)\b', text, re.I):
         props["is_solid"] = "Y"
@@ -18,72 +15,77 @@ def check_physical_properties(text):
         props["is_volatile"] = "Y"
     return props
 
-def process_sds_to_excel(pdf_path, output_name="SDS_Results.xlsx"):
+def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
     all_data = []
     
-    try:
-        print(f"--- Analyzing: {pdf_path} ---")
-        with pdfplumber.open(pdf_path) as pdf:
-            full_text = "".join([p.extract_text() or "" for p in pdf.pages])
+    # Loop through every PDF in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".pdf"):
+            pdf_path = os.path.join(folder_path, filename)
+            product_name = filename.replace(".pdf", "") # Use filename as Product Name
             
-            # Global properties
-            density_match = re.search(r'(?:Relative Density|Specific Gravity|Density):\s*([\d\.]+)', full_text, re.I)
-            density = density_match.group(1) if density_match else "N/A"
-            phys = check_physical_properties(full_text)
-            
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if not page_text: continue
-                
-                lines = page_text.split('\n')
-                for line in lines:
-                    # Look for CAS number
-                    cas_match = re.search(r'(\b\d{2,7}-\d{2}-\d\b)', line)
-                    if cas_match:
-                        cas = cas_match.group(1)
-                        
-                        # 1. Extract Name (Text before the CAS number)
-                        # We take everything before the CAS and clean up extra spaces/symbols
-                        name_part = line.split(cas)[0].strip()
-                        # Clean up common leading characters like bullet points or numbers
-                        name = re.sub(r'^[\d\.\-\s•*]+', '', name_part) or "Unknown Name"
-                        
-                        # 2. Extract Percentage
-                        percent_match = re.search(r'([\d\.]+\s*-\s*[\d\.]+\s*%|[\d\.]+\s*%|[\d\.]+\s*percent)', line, re.I)
-                        percent_val = get_conservative_percentage(percent_match.group(1)) if percent_match else "Check PDF"
+            try:
+                print(f"Processing: {filename}...")
+                with pdfplumber.open(pdf_path) as pdf:
+                    full_text = "".join([p.extract_text() or "" for p in pdf.pages])
+                    phys = check_physical_properties(full_text)
+                    
+                    for page in pdf.pages:
+                        page_text = page.extract_text()
+                        if not page_text: continue
+                        for line in page_text.split('\n'):
+                            cas_match = re.search(r'(\b\d{2,7}-\d{2}-\d\b)', line)
+                            if cas_match:
+                                cas = cas_match.group(1)
+                                name_part = line.split(cas)[0].strip()
+                                name = re.sub(r'^[\d\.\-\s•*]+', '', name_part) or "Unknown"
+                                
+                                percent_match = re.search(r'([\d\.]+\s*-\s*[\d\.]+\s*%|[\d\.]+\s*%|[\d\.]+\s*percent)', line, re.I)
+                                percent_val = get_conservative_percentage(percent_match.group(1)) if percent_match else 0.0
 
-                        # 3. Build row in your specific order
-                        all_data.append({
-                            "Contaminant Name": name,
-                            "CAS Number": cas,
-                            "Solids (Y/N)": phys["is_solid"],
-                            "Volatile (Y/N)": phys["is_volatile"],
-                            "% Composition": percent_val,
-                            "Relative Density": density
-                        })
+                                all_data.append({
+                                    "Contaminant Name": name.upper(),
+                                    "CAS Number": cas,
+                                    "Solids (Y/N)": phys["is_solid"],
+                                    "Volatile (Y/N)": phys["is_volatile"],
+                                    "Product": product_name,
+                                    "Percentage": percent_val
+                                })
+            except Exception as e:
+                print(f"Error with {filename}: {e}")
 
-        if not all_data:
-            print("❌ No ingredients found.")
-            return
+    if not all_data:
+        print("No data found!")
+        return
 
-        # Create DataFrame and Reorder Columns explicitly
-        df = pd.DataFrame(all_data).drop_duplicates()
-        
-        column_order = [
-            "Contaminant Name", 
-            "CAS Number", 
-            "Solids (Y/N)", 
-            "Volatile (Y/N)", 
-            "% Composition",
-            "Relative Density"
-        ]
-        df = df[column_order]
+    # 1. Create a DataFrame
+    df = pd.DataFrame(all_data)
 
-        df.to_excel(output_name, index=False)
-        print(f"✅ Success! Results saved to: {output_name}")
-        
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    # 2. "Pivot" the data: Products become columns, Contaminants stay as rows
+    # This puts the Percentage in the cells
+    matrix = df.pivot_table(
+        index=["Contaminant Name", "CAS Number", "Solids (Y/N)", "Volatile (Y/N)"],
+        columns="Product",
+        values="Percentage",
+        aggfunc='max' # If a contaminant appears twice in one SDS, take the max
+    ).reset_index()
 
-# Run it
-process_sds_to_excel("test_sds.pdf")
+    # 3. Sort by Contaminant Name alphabetically
+    matrix = matrix.sort_values(by="Contaminant Name")
+
+    # 4. Save to Excel
+    matrix.to_excel(output_name, index=False)
+    print(f"✅ Master Matrix saved to: {output_name}")
+
+# --- RUNNING IT ---
+# 1. Create a folder named 'sds_files' on your Desktop
+# 2. Put all your SDS PDFs in there
+# 3. Update the path below to your folder
+sds_folder = "/Users/zhangyuhao/Desktop/SDS_Project/sds_files"
+
+# Make the folder if it doesn't exist yet
+if not os.path.exists(sds_folder):
+    os.makedirs(sds_folder)
+    print(f"Please put your PDFs in the new folder: {sds_folder}")
+else:
+    process_all_sds(sds_folder)
