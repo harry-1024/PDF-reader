@@ -3,29 +3,42 @@ import re
 import pandas as pd
 import os
 
-def get_conservative_percentage(percent_string):
-    numbers = re.findall(r'[\d\.]+', percent_string)
-    return max(float(n) for n in numbers) if numbers else 0.0
+def get_conservative_percentage(line_text):
+    """
+    Improved: Searches the entire line for percentage-like patterns
+    and returns the highest number found.
+    """
+    # Look for patterns like "10-30", "10 - 30", "< 5", "80%"
+    # This regex is broader to catch numbers even if the % sign is far away
+    numbers = re.findall(r'(\d+(?:\.\d+)?)', line_text)
+    
+    # We only want numbers that are likely percentages (usually 0.1 to 100)
+    valid_percents = [float(n) for n in numbers if 0.1 <= float(n) <= 100]
+    
+    return max(valid_percents) if valid_percents else 0.0
 
 def check_physical_properties(text):
     props = {"is_solid": "N", "is_volatile": "N"}
-    if re.search(r'\b(Solid|Powder|Dust|Crystal|Granules)\b', text, re.I):
+    if re.search(r'\b(Solid|Powder|Dust|Crystal|Granules|Flakes)\b', text, re.I):
         props["is_solid"] = "Y"
-    if "volatile" in text.lower() or "vapor pressure" in text.lower():
+    if re.search(r'\b(Volatile|Vapor Pressure|Evaporation)\b', text, re.I):
         props["is_volatile"] = "Y"
     return props
 
 def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
     all_data = []
     
-    # Loop through every PDF in the folder
+    if not os.path.exists(folder_path):
+        print(f"Error: Folder {folder_path} not found.")
+        return
+
     for filename in os.listdir(folder_path):
-        if filename.endswith(".pdf"):
+        if filename.lower().endswith(".pdf"):
             pdf_path = os.path.join(folder_path, filename)
-            product_name = filename.replace(".pdf", "") # Use filename as Product Name
+            product_name = filename.rsplit('.', 1)[0] # Strip .pdf extension
             
             try:
-                print(f"Processing: {filename}...")
+                print(f"🔍 Analyzing: {filename}...")
                 with pdfplumber.open(pdf_path) as pdf:
                     full_text = "".join([p.extract_text() or "" for p in pdf.pages])
                     phys = check_physical_properties(full_text)
@@ -33,15 +46,19 @@ def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
                     for page in pdf.pages:
                         page_text = page.extract_text()
                         if not page_text: continue
+                        
                         for line in page_text.split('\n'):
-                            cas_match = re.search(r'(\b\d{2,7}-\d{2}-\d\b)', line)
+                            # Find CAS Number
+                            cas_match = re.search(r'(\d{2,7}-\d{2}-\d)', line)
                             if cas_match:
                                 cas = cas_match.group(1)
-                                name_part = line.split(cas)[0].strip()
-                                name = re.sub(r'^[\d\.\-\s•*]+', '', name_part) or "Unknown"
                                 
-                                percent_match = re.search(r'([\d\.]+\s*-\s*[\d\.]+\s*%|[\d\.]+\s*%|[\d\.]+\s*percent)', line, re.I)
-                                percent_val = get_conservative_percentage(percent_match.group(1)) if percent_match else 0.0
+                                # Extract Name (Everything before the CAS)
+                                name_part = line.split(cas)[0].strip()
+                                name = re.sub(r'^[\d\.\-\s•*]+', '', name_part) or "Unknown Chemical"
+                                
+                                # Extract Percentage from the same line
+                                percent_val = get_conservative_percentage(line)
 
                                 all_data.append({
                                     "Contaminant Name": name.upper(),
@@ -52,40 +69,43 @@ def process_all_sds(folder_path, output_name="Master_SDS_Matrix.xlsx"):
                                     "Percentage": percent_val
                                 })
             except Exception as e:
-                print(f"Error with {filename}: {e}")
+                print(f"Skipping {filename} due to error: {e}")
 
     if not all_data:
-        print("No data found!")
+        print("❌ No data was extracted. Please check if PDFs are readable.")
         return
 
-    # 1. Create a DataFrame
+    # Create DataFrame
     df = pd.DataFrame(all_data)
 
-    # 2. "Pivot" the data: Products become columns, Contaminants stay as rows
-    # This puts the Percentage in the cells
+    # 1. Pivot Table: Contaminants as Rows, Products as Columns
+    # index: First 4 columns you requested
+    # columns: The Product Names (from filenames)
     matrix = df.pivot_table(
         index=["Contaminant Name", "CAS Number", "Solids (Y/N)", "Volatile (Y/N)"],
         columns="Product",
         values="Percentage",
-        aggfunc='max' # If a contaminant appears twice in one SDS, take the max
+        aggfunc='max'
     ).reset_index()
 
-    # 3. Sort by Contaminant Name alphabetically
+    # 2. Sort Alphabetically by Name
     matrix = matrix.sort_values(by="Contaminant Name")
 
-    # 4. Save to Excel
+    # 3. Final polish: Fill empty cells with 0 (if a product doesn't have that chemical)
+    matrix = matrix.fillna(0)
+
+    # Save to Excel
     matrix.to_excel(output_name, index=False)
-    print(f"✅ Master Matrix saved to: {output_name}")
+    print(f"\n✅ Master Matrix Created!")
+    print(f"📂 Location: {os.path.abspath(output_name)}")
 
-# --- RUNNING IT ---
-# 1. Create a folder named 'sds_files' on your Desktop
-# 2. Put all your SDS PDFs in there
-# 3. Update the path below to your folder
-sds_folder = "/Users/zhangyuhao/Desktop/SDS_Project/sds_files"
+# --- AUTO-RUN ---
+# This looks for a folder called 'sds_files' in your project directory
+sds_folder = os.path.join(os.getcwd(), "sds_files")
 
-# Make the folder if it doesn't exist yet
 if not os.path.exists(sds_folder):
     os.makedirs(sds_folder)
-    print(f"Please put your PDFs in the new folder: {sds_folder}")
+    print(f"Empty folder created at: {sds_folder}")
+    print("Please put your SDS PDFs in that folder and run this script again.")
 else:
     process_all_sds(sds_folder)
