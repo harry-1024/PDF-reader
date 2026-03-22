@@ -85,4 +85,41 @@ def process_all_sds(folder_path):
                                     all_data.append({
                                         "CAS Number": cas,
                                         "Contaminant Name": clean_chemical_name(raw_name),
-                                        "Solids (Y/N)":
+                                        "Solids (Y/N)": s,
+                                        "Volatile (Y/N)": v,
+                                        "Product": product_name,
+                                        "Percentage": percent
+                                    })
+            except Exception as e:
+                print(f"Error reading {filename}: {e}")
+
+    if not all_data:
+        print("❌ No data found. Please check your PDF readability.")
+        return
+
+    df = pd.DataFrame(all_data)
+
+    # --- CAS-BASED MERGE ---
+    # Pick one consistent name for each CAS number
+    name_map = df.groupby('CAS Number')['Contaminant Name'].apply(lambda x: max(x, key=len)).to_dict()
+    df['Contaminant Name'] = df['CAS Number'].map(name_map)
+
+    # --- PIVOT TO MASTER MATRIX ---
+    matrix = df.pivot_table(
+        index=["Contaminant Name", "CAS Number", "Solids (Y/N)", "Volatile (Y/N)"],
+        columns="Product",
+        values="Percentage",
+        aggfunc='max'
+    ).reset_index()
+
+    # Alphabetical Sort
+    matrix = matrix.sort_values(by="Contaminant Name")
+    
+    # Save files
+    matrix.to_excel(output_name, index=False)
+    matrix.to_excel(backup_name, index=False)
+    print(f"✅ Master Matrix updated. Found {len(matrix)} unique CAS entries.")
+
+# Set path and run
+sds_folder = os.path.join(os.getcwd(), "sds_files")
+process_all_sds(sds_folder)
