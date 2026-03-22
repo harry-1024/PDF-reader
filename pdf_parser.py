@@ -44,4 +44,4 @@ def process_sds_to_excel(pdf_path, output_name="SDS_Results.xlsx"):
     print(f"✅ Success! Data saved to {output_name}")
 
 # To run it:
-process_sds_to_excel("your_test_file.pdf")
+process_sds_to_excel("test_sds.pdf")
